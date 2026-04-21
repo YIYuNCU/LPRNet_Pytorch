@@ -23,7 +23,17 @@ def read_image(filename):
     return image
 
 class LPRDataLoader(Dataset):
-    def __init__(self, img_dir, imgSize, lpr_max_len, PreprocFun=None):
+    def __init__(
+        self,
+        img_dir,
+        imgSize,
+        lpr_max_len,
+        PreprocFun=None,
+        augment=False,
+        aug_prob=0.7,
+        color_jitter=0.2,
+        noise_std=6.0,
+    ):
         self.img_dir = img_dir
         self.img_paths = []
         for i in range(len(img_dir)):
@@ -31,6 +41,10 @@ class LPRDataLoader(Dataset):
         random.shuffle(self.img_paths)
         self.img_size = imgSize
         self.lpr_max_len = lpr_max_len
+        self.augment = augment
+        self.aug_prob = aug_prob
+        self.color_jitter = color_jitter
+        self.noise_std = noise_std
         if PreprocFun is not None:
             self.PreprocFun = PreprocFun
         else:
@@ -47,6 +61,8 @@ class LPRDataLoader(Dataset):
         height, width, _ = Image.shape
         if height != self.img_size[1] or width != self.img_size[0]:
             Image = cv2.resize(Image, self.img_size)
+        if self.augment:
+            Image = self.augment_image(Image)
         Image = self.PreprocFun(Image)
 
         basename = os.path.basename(filename)
@@ -64,6 +80,40 @@ class LPRDataLoader(Dataset):
                 assert 0, "Error label ^~^!!!"
 
         return Image, label, len(label)
+
+    def augment_image(self, img):
+        if random.random() > self.aug_prob:
+            return img
+
+        h, w = img.shape[:2]
+
+        # Random affine transform to simulate camera jitter.
+        if random.random() < 0.5:
+            dx = random.uniform(-0.04, 0.04) * w
+            dy = random.uniform(-0.08, 0.08) * h
+            angle = random.uniform(-3.0, 3.0)
+            scale = random.uniform(0.96, 1.04)
+            m = cv2.getRotationMatrix2D((w * 0.5, h * 0.5), angle, scale)
+            m[0, 2] += dx
+            m[1, 2] += dy
+            img = cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+        # Brightness and contrast jitter.
+        if random.random() < 0.8:
+            alpha = 1.0 + random.uniform(-self.color_jitter, self.color_jitter)
+            beta = random.uniform(-20.0, 20.0)
+            img = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
+
+        # Mild blur for motion/defocus robustness.
+        if random.random() < 0.3:
+            img = cv2.GaussianBlur(img, (3, 3), 0)
+
+        # Gaussian noise for sensor robustness.
+        if random.random() < 0.3:
+            noise = np.random.normal(0.0, self.noise_std, img.shape).astype(np.float32)
+            img = np.clip(img.astype(np.float32) + noise, 0.0, 255.0).astype(np.uint8)
+
+        return img
 
     def transform(self, img):
         img = img.astype('float32')

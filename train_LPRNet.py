@@ -49,17 +49,28 @@ def sparse_tuple_for_ctc(T_length, lengths):
 
     return tuple(input_lengths), tuple(target_lengths)
 
-def adjust_learning_rate(optimizer, cur_epoch, base_lr, lr_schedule):
+def adjust_learning_rate(optimizer, cur_epoch, base_lr, lr_schedule, max_epoch, strategy='cosine', min_lr_ratio=0.01, warmup_epochs=0):
     """
-    Sets the learning rate
+    Sets the learning rate.
+    strategy='step': multi-step decay
+    strategy='cosine': cosine annealing with optional warmup and min lr floor
     """
-    lr = 0
-    for i, e in enumerate(lr_schedule):
-        if cur_epoch < e:
-            lr = base_lr * (0.1 ** i)
-            break
-    if lr == 0:
-        lr = base_lr
+    strategy = str(strategy).lower()
+
+    if strategy == 'step':
+        # Decay by 0.1 at each milestone and keep decayed lr in late epochs.
+        decay_count = sum(1 for e in lr_schedule if cur_epoch >= e)
+        lr = base_lr * (0.1 ** decay_count)
+    else:
+        min_lr = max(0.0, base_lr * min_lr_ratio)
+        if warmup_epochs > 0 and cur_epoch <= warmup_epochs:
+            lr = base_lr * float(cur_epoch) / float(max(1, warmup_epochs))
+        else:
+            total = max(1, max_epoch - warmup_epochs)
+            progress = float(cur_epoch - warmup_epochs) / float(total)
+            progress = min(max(progress, 0.0), 1.0)
+            lr = min_lr + 0.5 * (base_lr - min_lr) * (1.0 + math.cos(math.pi * progress))
+
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -112,6 +123,13 @@ def get_parser():
     parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
     parser.add_argument('--weight_decay', default=2e-5, type=float, help='Weight decay for SGD')
     parser.add_argument('--lr_schedule', default=[4, 8, 12, 14, 16], type=int, nargs='+', help='schedule for learning rate.')
+    parser.add_argument('--lr_strategy', default='cosine', choices=['step', 'cosine'], help='learning rate strategy')
+    parser.add_argument('--warmup_epochs', default=3, type=int, help='warmup epochs for cosine strategy')
+    parser.add_argument('--min_lr_ratio', default=0.01, type=float, help='minimum lr ratio relative to base lr for cosine strategy')
+    parser.add_argument('--augment', default=True, type=bool, help='enable training data augmentation')
+    parser.add_argument('--aug_prob', default=0.7, type=float, help='probability to apply augmentation per sample')
+    parser.add_argument('--color_jitter', default=0.2, type=float, help='color jitter strength')
+    parser.add_argument('--noise_std', default=6.0, type=float, help='std of gaussian noise in augmentation')
     parser.add_argument('--save_folder', default='./weights/', help='Location to save checkpoint models')
     # parser.add_argument('--pretrained_model', default='./weights/Final_LPRNet_model.pth', help='pretrained base model')
     parser.add_argument('--pretrained_model', default='', help='pretrained base model')
@@ -188,8 +206,16 @@ def train():
                          momentum=args.momentum, weight_decay=args.weight_decay)
     train_img_dirs = os.path.expanduser(args.train_img_dirs)
     test_img_dirs = os.path.expanduser(args.test_img_dirs)
-    train_dataset = LPRDataLoader(train_img_dirs.split(','), args.img_size, args.lpr_max_len)
-    test_dataset = LPRDataLoader(test_img_dirs.split(','), args.img_size, args.lpr_max_len)
+    train_dataset = LPRDataLoader(
+        train_img_dirs.split(','),
+        args.img_size,
+        args.lpr_max_len,
+        augment=args.augment,
+        aug_prob=args.aug_prob,
+        color_jitter=args.color_jitter,
+        noise_std=args.noise_std,
+    )
+    test_dataset = LPRDataLoader(test_img_dirs.split(','), args.img_size, args.lpr_max_len, augment=False)
     logger.info("Resolved train directories: %s", train_img_dirs)
     logger.info("Resolved test directories: %s", test_img_dirs)
 
@@ -208,6 +234,20 @@ def train():
     logger.info("Auto iterations per epoch: %d", auto_epoch_size)
     logger.info("Effective iterations per epoch: %d, total iterations: %d", epoch_size, max_iter)
     logger.info("Training log interval: %d, evaluation log interval: %d", args.log_interval, args.eval_log_interval)
+    logger.info(
+        "LR strategy: %s | warmup_epochs: %d | min_lr_ratio: %.6f | milestones: %s",
+        args.lr_strategy,
+        args.warmup_epochs,
+        args.min_lr_ratio,
+        args.lr_schedule,
+    )
+    logger.info(
+        "Augmentation: %s | aug_prob: %.2f | color_jitter: %.2f | noise_std: %.2f",
+        args.augment,
+        args.aug_prob,
+        args.color_jitter,
+        args.noise_std,
+    )
 
     ctc_loss = nn.CTCLoss(blank=len(CHARS)-1, reduction='mean') # reduction: 'none' | 'mean' | 'sum'
 
@@ -255,7 +295,16 @@ def train():
             # get ctc parameters
             input_lengths, target_lengths = sparse_tuple_for_ctc(T_length, lengths)
             # update lr
-            lr = adjust_learning_rate(optimizer, epoch, args.learning_rate, args.lr_schedule)
+            lr = adjust_learning_rate(
+                optimizer,
+                epoch,
+                args.learning_rate,
+                args.lr_schedule,
+                args.max_epoch,
+                strategy=args.lr_strategy,
+                min_lr_ratio=args.min_lr_ratio,
+                warmup_epochs=args.warmup_epochs,
+            )
             current_lr = lr
 
             if args.cuda:
