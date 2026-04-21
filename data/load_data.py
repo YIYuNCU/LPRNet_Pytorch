@@ -17,6 +17,11 @@ CHARS = ['京', '沪', '津', '渝', '冀', '晋', '蒙', '辽', '吉', '黑',
 
 CHARS_DICT = {char:i for i, char in enumerate(CHARS)}
 
+
+def read_image(filename):
+    image = cv2.imdecode(np.fromfile(filename, dtype=np.uint8), cv2.IMREAD_COLOR)
+    return image
+
 class LPRDataLoader(Dataset):
     def __init__(self, img_dir, imgSize, lpr_max_len, PreprocFun=None):
         self.img_dir = img_dir
@@ -36,7 +41,9 @@ class LPRDataLoader(Dataset):
 
     def __getitem__(self, index):
         filename = self.img_paths[index]
-        Image = cv2.imread(filename)
+        Image = read_image(filename)
+        if Image is None:
+            raise FileNotFoundError("Failed to read image file: {}".format(filename))
         height, width, _ = Image.shape
         if height != self.img_size[1] or width != self.img_size[0]:
             Image = cv2.resize(Image, self.img_size)

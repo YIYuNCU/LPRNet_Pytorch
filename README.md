@@ -10,7 +10,7 @@ Pytorch Implementation For LPRNet, A High Performance And Lightweight License Pl
 - python 3.x
 - imutils
 - Pillow
-- numpy
+- numpy=1.x
 
 # pretrained model
 

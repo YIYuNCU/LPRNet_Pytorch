@@ -21,6 +21,16 @@ import torch
 import time
 import cv2
 import os
+import math
+
+
+def decode_plate(indices):
+    return ''.join(CHARS[int(index)] for index in indices)
+
+
+def decode_plate_for_log(indices):
+    plate_text = decode_plate(indices)
+    return plate_text if plate_text else '<BLANK>'
 
 def get_parser():
     parser = argparse.ArgumentParser(description='parameters to train net')
@@ -48,7 +58,7 @@ def collate_fn(batch):
         imgs.append(torch.from_numpy(img))
         labels.extend(label)
         lengths.append(length)
-    labels = np.asarray(labels).flatten().astype(np.float32)
+    labels = np.asarray(labels).flatten().astype(np.int64)
 
     return (torch.stack(imgs, 0), torch.from_numpy(labels), lengths)
 
@@ -76,64 +86,80 @@ def test():
         cv2.destroyAllWindows()
 
 def Greedy_Decode_Eval(Net, datasets, args):
-    # TestNet = Net.eval()
-    epoch_size = len(datasets) // args.test_batch_size
+    Net.eval()
+
+    if len(datasets) == 0:
+        raise ValueError("The test dataset is empty. Check --test_img_dirs.")
+
+    epoch_size = max(1, math.ceil(len(datasets) / args.test_batch_size))
     batch_iterator = iter(DataLoader(datasets, args.test_batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn))
 
     Tp = 0
     Tn_1 = 0
     Tn_2 = 0
     t1 = time.time()
-    for i in range(epoch_size):
-        # load train data
-        images, labels, lengths = next(batch_iterator)
-        start = 0
-        targets = []
-        for length in lengths:
-            label = labels[start:start+length]
-            targets.append(label)
-            start += length
-        targets = np.array([el.numpy() for el in targets])
-        imgs = images.numpy().copy()
+    with torch.no_grad():
+        for i in range(epoch_size):
+            # load train data
+            images, labels, lengths = next(batch_iterator)
+            start = 0
+            targets = []
+            for length in lengths:
+                label = labels[start:start+length]
+                targets.append(label)
+                start += length
+            targets = np.array([el.numpy() for el in targets])
+            imgs = images.numpy().copy()
 
-        if args.cuda:
-            images = Variable(images.cuda())
-        else:
-            images = Variable(images)
-
-        # forward
-        prebs = Net(images)
-        # greedy decode
-        prebs = prebs.cpu().detach().numpy()
-        preb_labels = list()
-        for i in range(prebs.shape[0]):
-            preb = prebs[i, :, :]
-            preb_label = list()
-            for j in range(preb.shape[1]):
-                preb_label.append(np.argmax(preb[:, j], axis=0))
-            no_repeat_blank_label = list()
-            pre_c = preb_label[0]
-            if pre_c != len(CHARS) - 1:
-                no_repeat_blank_label.append(pre_c)
-            for c in preb_label: # dropout repeate label and blank label
-                if (pre_c == c) or (c == len(CHARS) - 1):
-                    if c == len(CHARS) - 1:
-                        pre_c = c
-                    continue
-                no_repeat_blank_label.append(c)
-                pre_c = c
-            preb_labels.append(no_repeat_blank_label)
-        for i, label in enumerate(preb_labels):
-            # show image and its predict label
-            if args.show:
-                show(imgs[i], label, targets[i])
-            if len(label) != len(targets[i]):
-                Tn_1 += 1
-                continue
-            if (np.asarray(targets[i]) == np.asarray(label)).all():
-                Tp += 1
+            if args.cuda:
+                images = Variable(images.cuda())
             else:
-                Tn_2 += 1
+                images = Variable(images)
+
+            # forward
+            prebs = Net(images)
+            # greedy decode
+            prebs = prebs.cpu().detach().numpy()
+            preb_labels = list()
+            for i in range(prebs.shape[0]):
+                preb = prebs[i, :, :]
+                preb_label = list()
+                for j in range(preb.shape[1]):
+                    preb_label.append(np.argmax(preb[:, j], axis=0))
+                no_repeat_blank_label = list()
+                pre_c = preb_label[0]
+                if pre_c != len(CHARS) - 1:
+                    no_repeat_blank_label.append(pre_c)
+                for c in preb_label: # dropout repeate label and blank label
+                    if (pre_c == c) or (c == len(CHARS) - 1):
+                        if c == len(CHARS) - 1:
+                            pre_c = c
+                        continue
+                    no_repeat_blank_label.append(c)
+                    pre_c = c
+                preb_labels.append(no_repeat_blank_label)
+            for i, label in enumerate(preb_labels):
+                target_text = decode_plate(targets[i])
+                predict_text = decode_plate(label)
+                print(
+                    "target:",
+                    decode_plate_for_log(targets[i]),
+                    "###",
+                    "T" if target_text == predict_text else "F",
+                    "###",
+                    "predict:",
+                    decode_plate_for_log(label),
+                )
+                # show image and its predict label
+                if args.show:
+                    show(imgs[i], label, targets[i])
+                if len(label) != len(targets[i]):
+                    Tn_1 += 1
+                    continue
+                if (np.asarray(targets[i]) == np.asarray(label)).all():
+                    Tp += 1
+                else:
+                    Tn_2 += 1
     Acc = Tp * 1.0 / (Tp + Tn_1 + Tn_2)
     print("[Info] Test Accuracy: {} [{}:{}:{}:{}]".format(Acc, Tp, Tn_1, Tn_2, (Tp+Tn_1+Tn_2)))
     t2 = time.time()
